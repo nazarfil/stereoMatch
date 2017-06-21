@@ -1,10 +1,12 @@
 #include "includes.h"
-#define SIZEX 384
-#define SIZEY 288
+#define SIZEX 1920
+#define SIZEY 1080
 #define CHANNEL 3
 #define DISPARITY_RANGE 7
 #define BLOCK_SIZE 32
 #define GRID_SIZE 4
+#define TILE_DIM 32
+#define BLOCK_ROW 8
 #include <stdlib.h> 
 #include "iostream"
 using namespace std;
@@ -40,21 +42,44 @@ int getMaxThreads(){
 				_maxCudaThreads = properties.maxThreadsPerBlock;
 				_maxCudaShared = properties.sharedMemPerMultiprocessor;
 				_maxSharedPerBlock = properties.sharedMemPerBlock;
-				printf("multiProcessorCount %d\n", _maxCudaProcs);
-				printf("maxThreadsPerBlock %d  max per dim %d and max per MP %d \n", _maxCudaThreads, properties.maxThreadsDim, properties.maxThreadsPerMultiProcessor);
-				printf("maxSharedPerMultiProcessor %d\n", _maxCudaShared);
-				printf("max Shared per block %d  and 2d texture %d \n", _maxSharedPerBlock, properties.maxTexture2D);
-				printf("Maximum grid %d and maximum warp %d  maximum threads n", properties.maxGridSize, properties.warpSize);
+				printf("\n GPU Stats \n # Cuda Processors: %d\n", _maxCudaProcs);
+				printf("#max Threads Per Block: %d \n", _maxCudaThreads);
+				printf("#Max of shared per block %d\n", _maxSharedPerBlock);
 				
 			}
 	}
 	// ----###########################
 	return _maxCudaThreads;
 };
+int getMaxShared(){
+	/*
+	CUDA DEVICE prop OUT
+	###################################
+	*/
+	int deviceCount, device;
+	int gpuDeviceCount = 0;
+	int  _maxCudaShared;
+	struct cudaDeviceProp properties;
+	cudaError_t cudaResultCode = cudaGetDeviceCount(&deviceCount);
+	if (cudaResultCode != cudaSuccess)
+		deviceCount = 0;
+	/* machines with no GPUs can still report one emulation device */
+	for (device = 0; device < deviceCount; ++device) {
+		cudaGetDeviceProperties(&properties, device);
+		if (properties.major != 9999) /* 9999 means emulation only */
+			if (device == 0)
+			{
+				_maxCudaShared = properties.sharedMemPerBlock;
+
+			}
+	}
+	// ----###########################
+	return _maxCudaShared;
+};
 // Main function
 int main(){
-	char* _filename = "tsukuba0.bmp";
-	char* _filename_2 = "tsukuba1.bmp";
+	char* _filename = "in_left.png";
+	char* _filename_2 = "in_right.png";
 	char* _out1 = "out_1.bmp";
 	char* _out2 = "out_2.bmp";
 	char* _out3 = "out_3.bmp";
@@ -214,14 +239,11 @@ void DisparityCPU(unsigned char* left, unsigned char* right, unsigned char* outp
 			output[idxl] = 255;
 			for (int k = -d; k < d; k++){
 				int tmp = -1;
-				/*
 				if ((j + k) >= 0 && (j + k) <= x){
 				idxr = idxl + k;
 				}
-				*/
-				idxr = idxl + k;
-				tmp = left[idxl] - right[idxr];
-				if (tmp == 0){
+				//idxr = idxl + k;
+				if (left[idxl] - right[idxr] == 0){
 				//	printf("Found disparity range of %i \n", k);
 					output[idxl] = k + DISPARITY_RANGE;
 				}
@@ -233,19 +255,42 @@ void DisparityCPU(unsigned char* left, unsigned char* right, unsigned char* outp
 
 __global__ void disparityGPU(unsigned char* left, unsigned char* right, unsigned char* out, int height, int width){
 
+	const int shared_size = TILE_DIM*(TILE_DIM+2*DISPARITY_RANGE);
+	__shared__ unsigned char s_right[shared_size];
 
+	// Tile start ->(blockIdx.y*gridDim.x + blockIdx.x)*(TILE_DIM*TILE_DIM)
+	int tile_idx = (blockIdx.y*gridDim.x + blockIdx.x)*(TILE_DIM*TILE_DIM);
+	if(threadIdx.x == 0){
+	//Frist thread copies it to shared
+		for (int i = 0; i < TILE_DIM; i++){
+			for (int j = 0; j <TILE_DIM + 2 * DISPARITY_RANGE; j++){
+				int idx_s = i*(TILE_DIM + 2 * DISPARITY_RANGE) + j;
+				int idx_r = tile_idx + i*(TILE_DIM + 2 * DISPARITY_RANGE) + j - DISPARITY_RANGE;
+				if (idx_r < 0){
+					idx_r = 0;
+				}
+				else if (idx_r > height*width-1){
+					idx_r = height*width-1;
+				}
+				s_right[idx_s] = right[idx_r];
 
-	// Disparity calculations
-
+				//printf("\n Thread id %i : %i \n", idx_s, s_right[idx_s]);
+			}
+		}
+	}
+	__syncthreads();
+	// Disparity calculations&	
 	int idx = (blockIdx.y*gridDim.x + blockIdx.x)*(blockDim.x*blockDim.y) + threadIdx.y*blockDim.x + threadIdx.x;
+	int idx_t = threadIdx.y*TILE_DIM + threadIdx.x;
 	unsigned char tmp;
-	int d = DISPARITY_RANGE;
 	out[idx] = 255;
-	for (int i = - d; i < d; i++){
-		if ((left[idx] - right[idx+i]) == 0){
-			out[idx] = d + DISPARITY_RANGE;
+	
+	for (int i = -DISPARITY_RANGE; i < DISPARITY_RANGE; i++){
+		if ((left[idx] - s_right[idx_t + i + DISPARITY_RANGE]) == 0){
+			out[idx] = i + DISPARITY_RANGE;
 		};
 	}
+	
 }
 
 cudaError_t gpuRun(unsigned char* left, unsigned char* right, unsigned char* out, int size, int height, int width){
@@ -277,11 +322,20 @@ cudaError_t gpuRun(unsigned char* left, unsigned char* right, unsigned char* out
 		fprintf(stderr, "cudaCopy 2 failed! \n");
 		goto Error;
 	}
-	int max_threads = getMaxThreads();
 
-	dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE); // so your threads are BLOCK_SIZE*BLOCK_SIZE, 256 in this case
-	int gridSize = (width*height + 1 )/(BLOCK_SIZE*BLOCK_SIZE);
-	disparityGPU << <gridSize, dimBlock >> >(d_left, d_right, d_out, height, width);
+	// Memory Data: shared= x^2+14*x-MaxShared;
+	int maxShared = getMaxShared();
+	int maxTile = 1+(sqrt(DISPARITY_RANGE*DISPARITY_RANGE*4 + 4 * maxShared) - 2 * DISPARITY_RANGE)/2 ;
+	int blPerTile = floor(maxTile / BLOCK_SIZE);
+	int tileSize = blPerTile*BLOCK_SIZE*(blPerTile*BLOCK_SIZE + DISPARITY_RANGE * 2);
+	int tiles =  (height*width) / (TILE_DIM*TILE_DIM);
+	printf("\n Running Kernel with %i TileSize %f tiles\n", tileSize, tiles);
+	// Threads Data: Th/Block, BlockSize, GridSize
+	int max_threads = getMaxThreads();
+	dim3 dim_block(TILE_DIM, TILE_DIM); // so your threads are BLOCK_SIZE*BLOCK_SIZE, 256 in this case
+	int grid_size = 1+ width*height / (TILE_DIM*TILE_DIM);
+	//Running the Kernel
+	disparityGPU << < grid_size, dim_block >> >(d_left, d_right, d_out, height, width);
 	cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "KERNEL failed: %s\n", cudaGetErrorString(cudaStatus));
