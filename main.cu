@@ -212,28 +212,28 @@ void GetCost(unsigned char *color, unsigned char *gradient, unsigned char *cost,
 }
 
 void BoxFilter(unsigned char* input,unsigned char* cost, unsigned char* q, int box, int x, int y){
-	char r = 9;
-	char radius = 2 * r + 1;
-	//
-	unsigned char *mean, *p, *covar, *pro;
-	mean = new unsigned char[x*y];
-	p = new unsigned char[x*y];
-	covar = new unsigned char[x*y];
-	mean = new unsigned char[x*y];
-	for (int i = 0; i < x*y; i++){
-		// Window
-		unsigned char wk=0;
-		int sum_m = 0, sum_p=0;
+char r = 9;
+char radius = 2 * r + 1;
+//
+unsigned char *mean, *p, *covar, *pro;
+mean = new unsigned char[x*y];
+p = new unsigned char[x*y];
+covar = new unsigned char[x*y];
+mean = new unsigned char[x*y];
+for (int i = 0; i < x*y; i++){
+	// Window
+	unsigned char wk = 0;
+	int sum_m = 0, sum_p = 0;
 
-		for (int j = 0; j < radius; j++){
-			for (int k = 0; k < radius; k++){
-				sum_m += input[i];
-				sum_p += cost[i];
-				wk++;
-			}
+	for (int j = 0; j < radius; j++){
+		for (int k = 0; k < radius; k++){
+			sum_m += input[i];
+			sum_p += cost[i];
+			wk++;
 		}
-		unsigned char mean = sum_m / wk;
 	}
+	unsigned char mean = sum_m / wk;
+}
 
 }
 
@@ -241,17 +241,15 @@ void DisparityCPU(unsigned char* left, unsigned char* right, unsigned char* outp
 	printf("Calculating disparity map for d=%i \n", d);
 	for (int i = 0; i < x; i++){
 		for (int j = 0; j < y; j++){
-			int idxl = i*y+j;
+			int idxl = i*y + j;
 			int idxr = idxl;
 			output[idxl] = 255;
 			for (int k = -d; k < d; k++){
 				int tmp = -1;
 				if ((j + k) >= 0 && (j + k) <= x){
-				idxr = idxl + k;
+					idxr = idxl + k;
 				}
-				//idxr = idxl + k;
 				if (left[idxl] - right[idxr] == 0){
-				//	printf("Found disparity range of %i \n", k);
 					output[idxl] = k + DISPARITY_RANGE;
 				}
 			}
@@ -262,28 +260,24 @@ void DisparityCPU(unsigned char* left, unsigned char* right, unsigned char* outp
 
 __global__ void disparityGPU(unsigned char* left, unsigned char* right, unsigned char* out, int height, int width){
 
-	const int shared_size = TILE_DIM*(TILE_DIM+2*DISPARITY_RANGE);
+	const int shared_size = TILE_DIM*(TILE_DIM + 2 * DISPARITY_RANGE);
 	__shared__ unsigned char s_right[shared_size];
 
 	// Tile start ->(blockIdx.y*gridDim.x + blockIdx.x)*(TILE_DIM*TILE_DIM)
 	int tile_idx = (blockIdx.y*gridDim.x + blockIdx.x)*(TILE_DIM*TILE_DIM);
-	if(threadIdx.x == 0){
 	//Frist thread copies it to shared
-		for (int i = 0; i < TILE_DIM; i++){
-			for (int j = 0; j <TILE_DIM + 2 * DISPARITY_RANGE; j++){
-				int idx_s = i*(TILE_DIM + 2 * DISPARITY_RANGE) + j;
-				int idx_r = tile_idx + i*(TILE_DIM + 2 * DISPARITY_RANGE) + j - DISPARITY_RANGE;
-				if (idx_r < 0){
-					idx_r = 0;
-				}
-				else if (idx_r > height*width-1){
-					idx_r = height*width-1;
-				}
-				s_right[idx_s] = right[idx_r];
-
-				//printf("\n Thread id %i : %i \n", idx_s, s_right[idx_s]);
-			}
+	for (int j = 0; j < TILE_DIM + 2 * DISPARITY_RANGE; j++){
+		int idx_s = threadIdx.x*(TILE_DIM + 2 * DISPARITY_RANGE) + j;
+		int idx_r = tile_idx + threadIdx.x*(TILE_DIM + 2 * DISPARITY_RANGE) + j - DISPARITY_RANGE;
+		if (idx_r < 0){
+			idx_r = 0;
 		}
+		else if (idx_r > height*width - 1){
+			idx_r = height*width - 1;
+		}
+		s_right[idx_s] = right[idx_r];
+
+		//printf("\n Thread id %i : %i \n", idx_s, s_right[idx_s]);
 	}
 	__syncthreads();
 	// Disparity calculations&	
@@ -291,84 +285,74 @@ __global__ void disparityGPU(unsigned char* left, unsigned char* right, unsigned
 	int idx_t = threadIdx.y*TILE_DIM + threadIdx.x;
 	unsigned char tmp;
 	out[idx] = 255;
-	
 	for (int i = -DISPARITY_RANGE; i < DISPARITY_RANGE; i++){
 		if ((left[idx] - s_right[idx_t + i + DISPARITY_RANGE]) == 0){
 			out[idx] = i + DISPARITY_RANGE;
 		};
 	}
-	
+
 }
 
 cudaError_t gpuRun(unsigned char* left, unsigned char* right, unsigned char* out, int size, int height, int width){
 	cudaError_t cudaStatus;
 	unsigned char *d_left, *d_right, *d_out;
-	// Memory Data: shared= x^2+14*x-MaxShared;
-	int maxShared = getMaxShared();
-	int maxTile = 1+(sqrt(DISPARITY_RANGE*DISPARITY_RANGE*4 + 4 * maxShared) - 2 * DISPARITY_RANGE)/2 ;
-	int blPerTile = floor(maxTile / BLOCK_SIZE);
-	int tileSize = blPerTile*BLOCK_SIZE*(blPerTile*BLOCK_SIZE + DISPARITY_RANGE * 2);
-	int tiles =  (height*width) / (TILE_DIM*TILE_DIM);
-	printf("\n Running Kernel with %i TileSize %f tiles\n", tileSize, tiles);
-	// Threads Data: Th/Block, BlockSize, GridSize
-	int max_threads = getMaxThreads();
-	dim3 dim_block(TILE_DIM, TILE_DIM); // so your threads are BLOCK_SIZE*BLOCK_SIZE, 256 in this case
-	int grid_size = 1+ width*height / (TILE_DIM*TILE_DIM);
-	//Chorno
-	PCFreq = 0.0;
-	CounterStart = 0;
-	clock_t start_t = clock();
-	StartCounter();
-
 	//allocating memory
-	cudaStatus = cudaMalloc((void**)&d_left, size*sizeof(unsigned char));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc 1 failed!");
+	if (cudaMalloc((void**)&d_left, size*sizeof(unsigned char)) != cudaSuccess){
 		goto Error;
 	}
-	cudaStatus = cudaMalloc((void**)&d_right, size*sizeof(unsigned char));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc 2 failed!");
+	if (cudaMalloc((void**)&d_right, size*sizeof(unsigned char)) != cudaSuccess){
 		goto Error;
 	}
-	cudaStatus = cudaMalloc((void**)&d_out, size*sizeof(unsigned char));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc 3 failed!");
+	if (cudaMalloc((void**)&d_out, size*sizeof(unsigned char)) != cudaSuccess){
 		goto Error;
 	}
-	cudaStatus = cudaMemcpy(d_left, left, size*sizeof(unsigned char), cudaMemcpyHostToDevice);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaCopy 1 failed! \n");
-		goto Error;
-	}
-	cudaStatus = cudaMemcpy(d_right, right, size*sizeof(unsigned char), cudaMemcpyHostToDevice);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaCopy 2 failed! \n");
-		goto Error;
-	}
-	printf("Time memory allocation&& copy HostToDevice: %f \n", getCounter());
-	StartCounter();
+
+	// Memory Data: shared= x^2+14*x-MaxShared; calcules inutiles
+		int maxShared = getMaxShared();
+		int maxTile = 1+(sqrt(DISPARITY_RANGE*DISPARITY_RANGE*4 + 4 * maxShared) - 2 * DISPARITY_RANGE)/2 ;
+		int blPerTile = floor(maxTile / BLOCK_SIZE);
+		int tileSize = blPerTile*BLOCK_SIZE*(blPerTile*BLOCK_SIZE + DISPARITY_RANGE * 2);
+		int tiles =  (height*width) / (TILE_DIM*TILE_DIM);
+
+	// Threads Data: Th/Block, BlockSize, GridSize
+		int max_threads = getMaxThreads();
+		dim3 dim_block(TILE_DIM, TILE_DIM); // so your threads are BLOCK_SIZE*BLOCK_SIZE, 256 in this case
+		int grid_size = 1+ width*height / (TILE_DIM*TILE_DIM);
+	//Chorno
+		PCFreq = 0.0;
+		CounterStart = 0;
+		clock_t start_t = clock();
+		StartCounter();
+	//printf("Time memory allocation&& copy HostToDevice: %f \n", getCounter());
+	//StartCounter();
+	//printf("Blocks %i\n \n", grid_size);
+	//Memory COpying
+		if (cudaMemcpy(d_left, left, size*sizeof(unsigned char), cudaMemcpyHostToDevice) != cudaSuccess){
+			goto Error;
+		}
+		if (cudaMemcpy(d_right, right, size*sizeof(unsigned char), cudaMemcpyHostToDevice) != cudaSuccess){
+			goto Error;
+		}
 	//Kernel Run
-	printf("Blocks %i\n \n", grid_size);
-	disparityGPU << < grid_size, dim_block >> >(d_left, d_right, d_out, height, width);
+		disparityGPU << < grid_size, dim_block >> >(d_left, d_right, d_out, height, width);
 
-	cudaStatus = cudaGetLastError();
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "KERNEL failed: %s\n", cudaGetErrorString(cudaStatus));
-		goto Error;
-	}
-	cudaDeviceSynchronize();
-	printf("Time kernel run: %f \n", getCounter());
-
-	StartCounter();
+		cudaStatus = cudaGetLastError();
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "KERNEL failed: %s\n", cudaGetErrorString(cudaStatus));
+			goto Error;
+		}
+	//cudaDeviceSynchronize();
+	//printf("Time kernel run: %f \n", getCounter());
+	//StartCounter();
 	cudaStatus = cudaMemcpy(out, d_out, size*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-	printf("Time memory copyDevice To Host: %f \n", getCounter());
+	printf("Total Tiem for gpu run : memcopies + kernel: %f \n", getCounter());
 	cudaFree(d_right);
 	cudaFree(d_left);
 	cudaFree(d_out);
 
 	printf(" \n # Successfully run the KERNEL # \n \n");
 Error:
+	printf("Runtime failed %i", cudaStatus);
 	return cudaStatus;
 }
 
