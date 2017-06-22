@@ -22,3 +22,5 @@
 #define GRID_SIZE 4
 #define TILE_DIM 32
 #define BLOCK_ROW 8
+
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
